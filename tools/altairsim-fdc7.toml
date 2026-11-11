@@ -1,0 +1,23 @@
+# An FDC+ set for the serial drive (drive type 7), for testing the FDC+ Tester
+# without a real FDC+. The default 56K Altair, with its 88-DCDD swapped for
+# an FDC+. Connect the FDC+'s serial port to one end of a null-modem cable and
+# run the tester on the other:
+#
+#     altairsim --set "fdc0 baud=403200" \
+#         -x "CONNECT fdc0:line serial:/dev/cu.usbserial-A" -x "RUN 0" -i tools/altairsim-fdc7.toml
+#
+# The FDC+ only talks while the machine runs, hence RUN. Change baud to see
+# the speed mismatch messages.
+
+[machine]
+name = "fdc7-bench"
+base = "default"
+
+[[board]]
+id     = "dsk0"
+remove = true
+
+[[board]]
+type      = "fdcplus"
+id        = "fdc0"
+drivetype = 7

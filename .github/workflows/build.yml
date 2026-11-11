@@ -1,0 +1,126 @@
+name: Build
+
+# Documentation-only changes don't rebuild. Tag pushes ignore path filters,
+# so a release tag always builds.
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+    paths-ignore:
+      - '**.md'
+      - LICENSE
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - LICENSE
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-22.04        # older glibc runs on more distributions
+            artifact: fdcplustest-linux-x86_64
+            configure: ''
+          - name: macOS universal
+            os: macos-latest
+            artifact: fdcplustest-macos-universal
+            configure: -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          - name: Windows x64
+            os: windows-latest
+            artifact: fdcplustest-windows-x64
+            configure: -A x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev libxext-dev libxft-dev libxinerama-dev libxcursor-dev \
+            libxrender-dev libxfixes-dev libpango1.0-dev libcairo2-dev \
+            libwayland-dev wayland-protocols libxkbcommon-dev libdbus-1-dev \
+            libgtk-3-dev
+
+      - name: Cache FLTK
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: fltk-${{ matrix.artifact }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.configure }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir dist
+          cp build/fdcplustest README.md LICENSE dist/
+          strip dist/fdcplustest
+          tar -czf ${{ matrix.artifact }}.tar.gz -C dist .
+          file dist/fdcplustest
+
+      - name: Verify macOS binary
+        if: runner.os == 'macOS'
+        run: |
+          lipo dist/fdcplustest -verify_arch arm64 x86_64
+          # Only system libraries and frameworks may be linked; anything else
+          # (e.g. from Homebrew) would not exist on users' machines.
+          if otool -L dist/fdcplustest | grep -E '^\s' | grep -vE '^\s*(/usr/lib/|/System/Library/)'; then
+            echo "::error::fdcplustest links against non-system libraries"
+            exit 1
+          fi
+
+      - name: Show Linux dependencies
+        if: runner.os == 'Linux'
+        run: ldd dist/fdcplustest
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item build/Release/fdcplustest.exe, README.md, LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath ${{ matrix.artifact }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.*
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" artifacts/* \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes
